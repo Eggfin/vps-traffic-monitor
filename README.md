@@ -67,15 +67,21 @@ curl 'http://168.110.47.44:18080/api/history?node=oracle-sg-0234&hours=24&token=
 ## 5. 在面板里改单台的设置（不用重装探针）
 
 ```bash
-# 改显示名、计费周期锚点日、计数方式（三项可只改其中一项）
+# 改显示名、计费周期锚点日、计数方式（各项可只改其中一项）
 curl -s -X POST http://168.110.47.44:18080/api/node \
   -H 'X-Token: 你的TOKEN' -H 'Content-Type: application/json' \
   -d '{"node":"yecaoyun-hk","display_name":"野草云-香港","cycle_day":26,"count_mode":"both"}'
+
+# 设校准值：本周期装探针前已用了入 120GB / 出 80GB（字节数，1GB = 1073741824）
+curl -s -X POST http://168.110.47.44:18080/api/node \
+  -H 'X-Token: 你的TOKEN' -H 'Content-Type: application/json' \
+  -d '{"node":"yecaoyun-hk","calibration_rx":128849018880,"calibration_tx":85899345920}'
 ```
 
 - `cycle_day`：计费周期锚点日，1–31，默认 1。比如 11 月 8 日开的机器填 8，周期就是每月 8 日 0 点 → 下月 8 日 0 点；野草云那台 10 月 26 日买的填 26。月份短的时候锚点自动顺延到当月最后一天（如 31 号 → 2 月 28 日）。
 - `display_name`：面板上显示的名字，不改就显示安装时 `--name` 的值。
 - `count_mode`：`both`（默认，入+出合计）、`out`（只算出）、`in`（只算入）。大多数 VPS 按双向计费，用默认就行；哪家只算单向就把那台改掉。
+- `calibration_rx` / `calibration_tx`：校准值（单位 Byte），只加到**本周期**的月流量上。比如一台机器装探针之前本周期已经用了 120GB，就填 `calibration_rx` / `calibration_tx` 各 120GB 换算成的字节数（面板里直接填 GB 就行，会自动换算）。注意三点：①只影响月窗口，周/天/小时是实测流量，不加校准；②到了下个周期自动失效，不会一直累加上去；③改了 `cycle_day` 后校准值失效，需要重填一次——因为它只属于改之前的那个周期。探针自己的累计计数不受影响，后续统计照常累加。
 
 ## 口径说明
 

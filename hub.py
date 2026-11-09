@@ -13,6 +13,13 @@ the panel without touching any agent:
   - display_name: name shown in the panel (default: node id).
   - count_mode: "both" (rx+tx, the default — most VPS bill bidirectional),
     "out" (tx only) or "in" (rx only), for providers that bill one direction.
+  - calibration_rx / calibration_tx: a manual correction for the CURRENT
+    billing cycle only, e.g. traffic the VPS already used before the agent
+    was installed. It is added to the month window only — week/day/hour are
+    measured traffic and never adjusted, later cycles start clean, and the
+    agent's own counting is untouched, so future stats keep accumulating
+    normally. Changing cycle_day drops the calibration (it belonged to the
+    old cycle); set it again for the new cycle if still needed.
 
 Windows (all rolling except month): month = current billing cycle,
 week = last 7 days, day = last 24 hours, hour = last 1 hour. Window
@@ -29,7 +36,8 @@ Endpoints (all but /health need the token, via X-Token header or ?token=):
   GET  /health
   GET  /api/stats            per-node month/week/day/hour + live rates
   GET  /api/history?node=X&hours=N
-  POST /api/node             {node, display_name?, cycle_day?, count_mode?}
+  POST /api/node             {node, display_name?, cycle_day?, count_mode?,
+                            calibration_rx?, calibration_tx?} (bytes, >= 0)
 """
 import calendar
 import json
@@ -75,7 +83,9 @@ def db():
         rx_total INTEGER, tx_total INTEGER,
         rx_rate REAL, tx_rate REAL,
         display_name TEXT, cycle_day INTEGER DEFAULT 1,
-        count_mode TEXT DEFAULT 'both')""")
+        count_mode TEXT DEFAULT 'both',
+        cal_rx INTEGER DEFAULT 0, cal_tx INTEGER DEFAULT 0,
+        cal_cycle_start INTEGER)""")
     conn.execute("""CREATE TABLE IF NOT EXISTS samples(
         id INTEGER PRIMARY KEY AUTOINCREMENT, node TEXT, ts INTEGER,
         rx_total INTEGER, tx_total INTEGER, rx_rate REAL, tx_rate REAL)""")
@@ -85,6 +95,9 @@ def db():
     for col, ddl in (("display_name", "ALTER TABLE nodes ADD COLUMN display_name TEXT"),
                      ("cycle_day", "ALTER TABLE nodes ADD COLUMN cycle_day INTEGER DEFAULT 1"),
                      ("count_mode", "ALTER TABLE nodes ADD COLUMN count_mode TEXT DEFAULT 'both'"),
+                     ("cal_rx", "ALTER TABLE nodes ADD COLUMN cal_rx INTEGER DEFAULT 0"),
+                     ("cal_tx", "ALTER TABLE nodes ADD COLUMN cal_tx INTEGER DEFAULT 0"),
+                     ("cal_cycle_start", "ALTER TABLE nodes ADD COLUMN cal_cycle_start INTEGER"),
                      ("rx_total", "ALTER TABLE nodes ADD COLUMN rx_total INTEGER"),
                      ("tx_total", "ALTER TABLE nodes ADD COLUMN tx_total INTEGER")):
         try:
@@ -208,7 +221,8 @@ class Handler(BaseHTTPRequestHandler):
             conn = db()
             rows = conn.execute(
                 "SELECT node, iface, last_seen, rx_total, tx_total,"
-                " rx_rate, tx_rate, display_name, cycle_day, count_mode"
+                " rx_rate, tx_rate, display_name, cycle_day, count_mode,"
+                " cal_rx, cal_tx, cal_cycle_start"
                 " FROM nodes ORDER BY node").fetchall()
             nodes = []
             total_month = 0
@@ -217,7 +231,21 @@ class Handler(BaseHTTPRequestHandler):
                 rx_total, tx_total = r[3] or 0, r[4] or 0
                 cycle_day = r[8] or 1
                 count_mode = r[9] or "both"
+                cal_rx, cal_tx = r[10] or 0, r[11] or 0
                 windows = node_windows(conn, node, cycle_day, count_mode)
+                # Calibration applies to this cycle's month window only.
+                cal_active = (r[12] is not None
+                              and r[12] == windows["month"]["since"]
+                              and (cal_rx or cal_tx))
+                if cal_active:
+                    windows["month"]["rx"] += cal_rx
+                    windows["month"]["tx"] += cal_tx
+                    windows["month"]["total"] = apply_mode(
+                        windows["month"]["rx"], windows["month"]["tx"],
+                        count_mode)
+                windows["month"]["calibration"] = {
+                    "rx": cal_rx if cal_active else 0,
+                    "tx": cal_tx if cal_active else 0}
                 total_month += windows["month"]["total"]
                 nodes.append({
                     "node": node,
@@ -314,14 +342,32 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(400, {"error": "count_mode must be both/out/in"})
                 updates.append("count_mode=?")
                 params.append(mode)
-            if not updates:
+            set_calibration = ("calibration_rx" in data
+                               or "calibration_tx" in data)
+            if not updates and not set_calibration:
                 return self._send(400, {"error": "nothing to update"})
             conn = db()
-            exists = conn.execute(
-                "SELECT 1 FROM nodes WHERE node=?", (node,)).fetchone()
-            if not exists:
+            row = conn.execute(
+                "SELECT cycle_day FROM nodes WHERE node=?", (node,)).fetchone()
+            if not row:
                 conn.close()
                 return self._send(404, {"error": "unknown node"})
+            # Effective cycle day: the new one if cycle_day is in this
+            # same request, else the stored one. Calibration is stamped to
+            # the current cycle under that anchor.
+            eff_day = int(data["cycle_day"]) if "cycle_day" in data else (row[0] or 1)
+            if set_calibration:
+                cal_rx = int(data.get("calibration_rx") or 0)
+                cal_tx = int(data.get("calibration_tx") or 0)
+                if cal_rx < 0 or cal_tx < 0:
+                    conn.close()
+                    return self._send(400, {"error": "calibration must be >= 0"})
+                updates.append("cal_rx=?")
+                params.append(cal_rx)
+                updates.append("cal_tx=?")
+                params.append(cal_tx)
+                updates.append("cal_cycle_start=?")
+                params.append(cycle_start_ts(int(time.time()), eff_day))
             params.append(node)
             conn.execute(
                 f"UPDATE nodes SET {', '.join(updates)} WHERE node=?", params)
