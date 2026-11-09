@@ -83,6 +83,34 @@ curl -s -X POST http://168.110.47.44:18080/api/node \
 - `count_mode`：`both`（默认，入+出合计）、`out`（只算出）、`in`（只算入）。大多数 VPS 按双向计费，用默认就行；哪家只算单向就把那台改掉。
 - `calibration_rx` / `calibration_tx`：校准值（单位 Byte），只加到**本周期**的月流量上。比如一台机器装探针之前本周期已经用了 120GB，就填 `calibration_rx` / `calibration_tx` 各 120GB 换算成的字节数（面板里直接填 GB 就行，会自动换算）。注意三点：①只影响月窗口，周/天/小时是实测流量，不加校准；②到了下个周期自动失效，不会一直累加上去；③改了 `cycle_day` 后校准值失效，需要重填一次——因为它只属于改之前的那个周期。探针自己的累计计数不受影响，后续统计照常累加。
 
+## 6. 中枢管理菜单 hubman（终端里用，像 portman 那样）
+
+在中枢那台机器上装一次，之后任意位置输入 `j` 回车就能打开菜单：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Eggfin/vps-traffic-monitor/main/hubman.sh -o /tmp/hubman \
+  && sudo install -m 755 /tmp/hubman /usr/local/bin/hubman \
+  && sudo ln -sf /usr/local/bin/hubman /usr/local/bin/j \
+  && grep -q "alias j=" ~/.bashrc || echo "alias j='hubman'" >> ~/.bashrc \
+  && source ~/.bashrc && j
+```
+
+菜单里有这些：
+
+```
+1. 查看监控机器（几台 + 每台月/周/天/小时）
+2. 查看单台详情（锚点日、计数方式、校准值、累计量、速率、近 24 小时采样点）
+3. 更新中枢（拉最新 hub.py 并重启，旧版先备份）
+4. 更新 hubman
+5. 重启中枢服务
+6. 查看中枢日志（最近 50 行）
+7. 查看中枢状态
+8. 绑定快捷键 j
+0. 退出
+```
+
+hubman 只读本机 `127.0.0.1:18080`，不走公网；token 从 `/etc/vps-traffic/hub.conf` 里读，不用再输一遍。
+
 ## 口径说明
 
 - **月流量**：本计费周期内累计，从 `cycle_day` 那天 0 点起算（中枢服务器本地时间）。周/天/小时是滚动窗口：过去 7 天、过去 24 小时、过去 1 小时。面板按 月 → 周 → 天 → 小时 的顺序显示。
