@@ -64,7 +64,13 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now vps-traffic-agent
+systemctl enable vps-traffic-agent
+# Restart, not just start: if an agent is already running with an old
+# config, `enable --now` leaves it running untouched and the new --name
+# never takes effect until the next reboot (this bit three machines on
+# 2026-11-10: they kept reporting as nbcloud-tokyo after being
+# reinstalled as jtti-jp / oracle-tokyo-1404 / oracle-sg-0234).
+systemctl restart vps-traffic-agent
 sleep 2
 systemctl status vps-traffic-agent --no-pager || true
 echo "agent installed: node=$NODE hub=$HUB"
