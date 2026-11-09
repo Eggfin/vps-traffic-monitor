@@ -8,7 +8,7 @@ VPS B ─┼─ POST /api/push (X-Token) ─▶ Hub (SQLite) ─▶ Space 仪表
 VPS C ─┘
 ```
 
-零依赖：探针和中枢都只用 Python 3 标准库，不装 vnstat / Prometheus。流量从 `/proc/net/dev` 读，探针自己做按月累计，机器重启也不丢数（计数器归零时把重启前的当月量结转）。
+零依赖：探针和中枢都只用 Python 3 标准库，不装 vnstat / Prometheus。流量从 `/proc/net/dev` 读，探针上报自安装起的累计总量（机器重启也不丢数，计数器归零时把重启前的量结转）；月/周/天/小时四个窗口由中枢从累计数列里算出来，所以计费周期、显示名、计数方式都能在面板里改，不用重装探针。
 
 ## 1. 先定一个 token
 
@@ -20,7 +20,7 @@ openssl rand -hex 16
 
 ## 2. 在中枢机上装 hub（只装一台）
 
-比如放新加坡 Oracle `134.185.93.143` 上：
+比如放东京小服务器 rebuild3 `168.110.47.44` 上：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Eggfin/vps-traffic-monitor/main/install-hub.sh \
@@ -40,7 +40,7 @@ curl 'http://127.0.0.1:18080/api/stats?token=你的TOKEN'
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Eggfin/vps-traffic-monitor/main/install-agent.sh \
-  | sudo bash -s -- --hub http://134.185.93.143:18080 --token 你的TOKEN --name oracle-sg-0234
+  | sudo bash -s -- --hub http://168.110.47.44:18080 --token 你的TOKEN --name oracle-sg-0234
 ```
 
 节点名建议（按你自己的机器改）：
@@ -57,20 +57,35 @@ curl -fsSL https://raw.githubusercontent.com/Eggfin/vps-traffic-monitor/main/ins
 ## 4. 查看
 
 ```bash
-# 全部节点：当月入/出/合计、实时速率、最后上报时间
-curl 'http://134.185.93.143:18080/api/stats?token=你的TOKEN'
+# 全部节点：月/周/天/小时四个窗口、实时速率、最后上报时间
+curl 'http://168.110.47.44:18080/api/stats?token=你的TOKEN'
 
 # 单节点 24 小时曲线（给 Space 画图用）
-curl 'http://134.185.93.143:18080/api/history?node=oracle-sg-0234&hours=24&token=你的TOKEN'
+curl 'http://168.110.47.44:18080/api/history?node=oracle-sg-0234&hours=24&token=你的TOKEN'
 ```
+
+## 5. 在面板里改单台的设置（不用重装探针）
+
+```bash
+# 改显示名、计费周期锚点日、计数方式（三项可只改其中一项）
+curl -s -X POST http://168.110.47.44:18080/api/node \
+  -H 'X-Token: 你的TOKEN' -H 'Content-Type: application/json' \
+  -d '{"node":"yecaoyun-hk","display_name":"野草云-香港","cycle_day":26,"count_mode":"both"}'
+```
+
+- `cycle_day`：计费周期锚点日，1–31，默认 1。比如 11 月 8 日开的机器填 8，周期就是每月 8 日 0 点 → 下月 8 日 0 点；野草云那台 10 月 26 日买的填 26。月份短的时候锚点自动顺延到当月最后一天（如 31 号 → 2 月 28 日）。
+- `display_name`：面板上显示的名字，不改就显示安装时 `--name` 的值。
+- `count_mode`：`both`（默认，入+出合计）、`out`（只算出）、`in`（只算入）。大多数 VPS 按双向计费，用默认就行；哪家只算单向就把那台改掉。
 
 ## 口径说明
 
-- **当月流量**：按自然月（`YYYY-MM`）累计，入 + 出分开记，`total_month = rx + tx`。每月 1 日 0 点自动清零。注意：当月量从装上探针那一刻开始算，安装之前的流量不补记（要补历史得用 vnstat 的数据库，本方案没接）。
+- **月流量**：本计费周期内累计，从 `cycle_day` 那天 0 点起算（中枢服务器本地时间）。周/天/小时是滚动窗口：过去 7 天、过去 24 小时、过去 1 小时。面板按 月 → 周 → 天 → 小时 的顺序显示。
+- **双向流量**：入（rx）和出（tx）分开记，`total = rx + tx`（`count_mode` 改成单向时 total 只取那一向）。面板上入/出/合计三项都看得到。
+- **累计起点**：每个窗口的量都从装上探针那一刻开始算，安装之前的流量不补记（要补历史得用 vnstat 的数据库，本方案没接）。周期锚点改了之后，月窗口按新锚点重算，不用重装探针。
 - **实时速率**：两次上报之间的差值 / 间隔，单位 Byte/s，Space 上换算成 Mbps 显示。
 - **网卡**：默认自动选默认路由的网卡，只统计这一块公网网卡，内网流量（`10.0.0.0/8` 那种）不走这块网卡所以不计入。想指定网卡：`--iface eth0`。
 - **上报间隔**：默认 30 秒，`--interval 60` 可改。间隔越短越“实时”，但没必要低于 10 秒。
-- **数据保留**：节点最新状态一直保留，历史采样只留 7 天。
+- **数据保留**：节点最新状态一直保留，历史采样留 40 天（够一个完整计费周期加一周）。
 
 ## 文件
 

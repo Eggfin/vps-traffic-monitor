@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
-"""VPS traffic agent — stdlib only, no dependencies.
+"""VPS traffic agent v2 — stdlib only, no dependencies.
 
-Reads /proc/net/dev, keeps a persistent monthly counter (survives
-reboots: counters reset to 0 on boot, the agent carries the pre-reboot
-amount forward), and POSTs a sample to the hub every INTERVAL seconds.
+Reads /proc/net/dev and POSTs a sample to the hub every INTERVAL seconds.
+
+v2 design: the agent reports CUMULATIVE totals since install (monotonic,
+reboot-proof — counters reset to 0 on boot, the agent carries the
+pre-reboot amount forward). It does NOT decide the billing cycle. The hub
+computes month/week/day/hour windows from the cumulative series, so the
+billing-cycle anchor day, display name and counting mode can all be changed
+in the panel later without touching the agent.
 
 Config (later source wins): /etc/vps-traffic/agent.conf, then env vars.
-  HUB_URL   e.g. http://134.185.93.143:18080  (no trailing slash)
-  TOKEN     shared secret, must match the hub
-  NODE      node name, e.g. oracle-sg-0234 (default: hostname)
+  HUB_URL   e.g. http://168.110.47.44:18080  (no trailing slash)
+  TOKEN     shared secret, must match the hub (ASCII only — it is sent as
+            an HTTP header; non-ASCII values are rejected at startup)
+  NODE      node name, e.g. yecaoyun-hk (default: hostname)
   INTERVAL  seconds between pushes, default 30
   IFACE     network interface, default auto (default-route iface)
 """
@@ -87,9 +93,27 @@ def pick_iface(cfg, counters):
 def load_state():
     try:
         with open(STATE_FILE) as f:
-            return json.load(f)
+            state = json.load(f)
     except (OSError, ValueError):
-        return {}
+        return {"total_rx": 0, "total_tx": 0,
+                "last_rx": None, "last_tx": None, "last_ts": None}
+    if "total_rx" not in state:
+        # Migrate a v1 state file (natural-month accounting) so a reinstall
+        # keeps what was already counted instead of restarting from zero.
+        base_rx = state.get("base_rx") or 0
+        base_tx = state.get("base_tx") or 0
+        last_rx = state.get("last_rx")
+        last_tx = state.get("last_tx")
+        state["total_rx"] = (state.get("carried_rx") or 0) + (
+            max(0, last_rx - base_rx) if last_rx is not None else 0)
+        state["total_tx"] = (state.get("carried_tx") or 0) + (
+            max(0, last_tx - base_tx) if last_tx is not None else 0)
+    state.setdefault("total_rx", 0)
+    state.setdefault("total_tx", 0)
+    state.setdefault("last_rx", None)
+    state.setdefault("last_tx", None)
+    state.setdefault("last_ts", None)
+    return state
 
 
 def save_state(state):
@@ -122,52 +146,35 @@ def main():
           flush=True)
 
     state = load_state()
-    month = time.strftime("%Y-%m")
-    if state.get("month") != month:
-        state = {"month": month, "base_rx": 0, "base_tx": 0,
-                 "carried_rx": 0, "carried_tx": 0,
-                 "last_rx": None, "last_tx": None, "last_ts": None}
-        # base is set from the first reading below
-    if state.get("base_rx") is None:
-        state["base_rx"] = 0
 
     while True:
         try:
             rx, tx = read_dev()[iface]
             now = time.time()
-            cur_month = time.strftime("%Y-%m")
-            if cur_month != state["month"]:
-                state = {"month": cur_month, "base_rx": rx, "base_tx": tx,
-                         "carried_rx": 0, "carried_tx": 0,
-                         "last_rx": None, "last_tx": None, "last_ts": None}
             if state.get("last_rx") is None:
-                # First reading (or first after month rollover): anchor base.
-                if state["month"] == month and state.get("base_rx", 0) == 0 \
-                        and state.get("carried_rx", 0) == 0:
-                    state["base_rx"], state["base_tx"] = rx, tx
-                state["last_rx"], state["last_tx"], state["last_ts"] = rx, tx, now
+                state.update({"last_rx": rx, "last_tx": tx, "last_ts": now})
                 save_state(state)
                 time.sleep(interval)
                 continue
 
             last_rx, last_tx, last_ts = (state["last_rx"], state["last_tx"],
                                          state["last_ts"])
-            # Counters reset on reboot: carry the pre-reboot monthly amount.
-            if rx < last_rx:
-                state["carried_rx"] += max(0, last_rx - state["base_rx"])
-                state["base_rx"] = 0
-            if tx < last_tx:
-                state["carried_tx"] += max(0, last_tx - state["base_tx"])
-                state["base_tx"] = 0
+            # Counters reset on reboot: the post-boot counter already counts
+            # traffic since boot, so treat the pre-reboot reading as 0.
+            # (Traffic in the <=interval gap across the reboot is lost;
+            # at most one interval's worth.)
+            delta_rx = rx - last_rx if rx >= last_rx else rx
+            delta_tx = tx - last_tx if tx >= last_tx else tx
             dt = max(1, now - last_ts)
-            rx_rate = max(0, rx - last_rx) / dt if rx >= last_rx else 0
-            tx_rate = max(0, tx - last_tx) / dt if tx >= last_tx else 0
-            rx_month = state["carried_rx"] + max(0, rx - state["base_rx"])
-            tx_month = state["carried_tx"] + max(0, tx - state["base_tx"])
+            rx_rate = max(0, delta_rx) / dt
+            tx_rate = max(0, delta_tx) / dt
+            state["total_rx"] += max(0, delta_rx)
+            state["total_tx"] += max(0, delta_tx)
 
             payload = json.dumps({
                 "node": node, "iface": iface, "ts": int(now),
-                "rx_month": rx_month, "tx_month": tx_month,
+                "rx_total": state["total_rx"],
+                "tx_total": state["total_tx"],
                 "rx_rate": rx_rate, "tx_rate": tx_rate,
             }).encode()
             req = urllib.request.Request(
