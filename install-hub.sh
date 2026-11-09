@@ -22,6 +22,10 @@ done
   echo "generate one with: openssl rand -hex 16" >&2
   exit 2
 }
+if printf '%s' "$TOKEN" | LC_ALL=C grep -q '[^ -~]'; then
+  echo "error: --token must be ASCII-only (no Chinese characters); agents send it as an HTTP header" >&2
+  exit 2
+fi
 [ "$(id -u)" = "0" ] || { echo "run as root (sudo)" >&2; exit 1; }
 command -v python3 >/dev/null || { echo "python3 is required" >&2; exit 1; }
 command -v curl >/dev/null || command -v wget >/dev/null || { echo "curl or wget is required" >&2; exit 1; }

@@ -110,6 +110,11 @@ def main():
         print("agent: HUB_URL and TOKEN are required "
               "(set in /etc/vps-traffic/agent.conf or env)", file=sys.stderr)
         return 2
+    if not token.isascii():
+        print("agent: TOKEN must be ASCII-only (it is sent as an HTTP header;"
+              " check /etc/vps-traffic/agent.conf for non-ASCII characters,"
+              " e.g. a placeholder that was never replaced)", file=sys.stderr)
+        return 2
 
     counters = read_dev()
     iface = pick_iface(cfg, counters)
